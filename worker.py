@@ -34,20 +34,24 @@ def fibonacci(n):
         return b
 
 
-def get(name):
-    return f'Hello, {name}'
-
-def get_all(name):
-    return f'GET ALL, {name}'
-
-def calculate_double(value):
-    fibonacci(random.randint(1, 15))
-    return 2 * value
+def get(argument):
+    result = fibonacci(2)  # надо чем-то занять
+    return argument
 
 
-def calculate_power(value):
-    fibonacci(random.randint(1, 15))
-    return value * value
+def get_all(argument):
+    result = fibonacci(4)  # надо чем-то занять
+    return argument
+
+
+def calculate_double(argument):
+    result = fibonacci(random.randint(1, 15))
+    return argument + 1
+
+
+def calculate_power(argument):
+    result = fibonacci(random.randint(1, 15))
+    return argument + 1
 
 
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -56,6 +60,7 @@ subsystem = str(sys.argv[1])  # название подсистемы, оно ж
 consumer_id = str(sys.argv[2])  # идентификатор воркера
 group_name = 'workers'  # общее для всех воркеров системы
 
+
 def logger(filename, text):
     if filename:
         with open(filename, "a") as log:
@@ -63,6 +68,8 @@ def logger(filename, text):
     else:
         print(text)
 
+# todo происходит racing, когда один воркер еще не передал команду тенанта другому, а третий считает, что этот первый
+#  обрабатывает команду и клеймит на него
 def dispatched(message_id, tenant_id, command_id) -> bool:
     pending_entries = r.xpending_range(subsystem, group_name, '-', message_id, 20)
     if not pending_entries:
@@ -83,10 +90,12 @@ def dispatched(message_id, tenant_id, command_id) -> bool:
             for _command_id in entry:
                 _command = json.loads(entry[_command_id])
                 _tenant_id = _command['tenant_id']
-                if tenant_id == _tenant_id:  # кто-то уже обрабатывает команду для этого тенанта и это не запрос
+                if tenant_id == _tenant_id and \
+                        _command['type'] != 'query':  # кто-то уже обрабатывает команду для этого тенанта и это не запрос
                     r.xclaim(subsystem, group_name, other_worker, 1, [message_id])
                     for f in [None, 'worker.txt', f"worker-{subsystem}-{consumer_id}.txt"]:
-                        logger(f, f'{consumer_id} обработчик передает обработку {command_id} для тенанта {tenant_id} обработчику {other_worker}, потому что он уже обрабатывает команду {_command_id}')
+                        logger(f,
+                               f'{consumer_id} обработчик передает обработку {command_id} для тенанта {tenant_id} обработчику {other_worker}, потому что он уже обрабатывает команду {_command_id}')
 
                     return True
                 else:
@@ -107,43 +116,43 @@ def process_commands(entries, dispatch=True):
             tenant_id = command['tenant_id']
             if not dispatch or command_type == 'query' or not dispatched(message_id, tenant_id, command_id):
                 start_time = datetime.now()
-                for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
-                    logger(f, f"worker-{subsystem}-{consumer_id} S {start_time} {command['id']} {command['name']}")
+                # for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
+                #     logger(f, f"worker-{subsystem}-{consumer_id} S {start_time} {command['id']} {command['name']}")
                 pprint(command)
                 if command['name'] == 'get':
-                    name = command['params']['aggregate_id']
+                    argument = command['params']['argument']
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenant_id': tenant_id,
                         'name': 'get-completed',
-                        'result': get(name)
+                        'result': get(argument)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
                 elif command['name'] == 'get_all':
-                    name = command['params']['aggregate_id']
+                    argument = command['params']['argument']
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenant_id': tenant_id,
                         'name': 'get_all-completed',
-                        'result': get_all(name)
+                        'result': get_all(argument)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
                 elif command['name'] == 'calculate-double':
-                    val = command['params']['value']
+                    argument = command['params']['argument']
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenand_id': tenant_id,
                         'name': 'calculate-double-completed',
-                        'result': calculate_double(val)
+                        'result': calculate_double(argument)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
                 elif command['name'] == 'calculate-power':
-                    val = command['params']['value']
+                    argument = command['params']['argument']
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenand_id': tenant_id,
                         'name': 'calculate-power-completed',
-                        'result': calculate_power(val)
+                        'result': calculate_power(argument)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
 
@@ -159,13 +168,17 @@ def end_command(command, command_id, message_id, response, tenant_id):
     r.xack(subsystem, group_name, message_id)
 
 
-
 try:
     r.xgroup_create(subsystem, group_name, mkstream=True)
 except:
     pass
 
 last_seen = '>'
+start_time = datetime.now()
+for f in [None, 'worker.txt', f"worker-{subsystem}-{consumer_id}.txt"]:
+    logger(f,
+           f'{consumer_id} обработчик запущен {start_time} ....')
+
 while True:
     print('новый цикл')
     entries = r.xreadgroup(group_name, consumer_id, {subsystem: last_seen}, count=1, block=3000)  # or block None??

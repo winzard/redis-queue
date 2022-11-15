@@ -5,7 +5,6 @@ $ python3 client.py A
 в файлах tenant_1.txt tenant_2.txt tenant_3.txt будет лог обработки и диспетчеризации команд
 '''
 
-
 import json
 import os
 import random
@@ -17,8 +16,9 @@ from time import sleep
 
 import redis
 import sys
-subsystem = str(sys.argv[1]) # название подсистемы, оно же название стрима
-client_id = str(sys.argv[2]) # идентификатор клиента
+
+subsystem = str(sys.argv[1])  # название подсистемы, оно же название стрима
+client_id = str(sys.argv[2])  # идентификатор клиента
 
 
 def got_expected_response(entries, command_id):
@@ -32,8 +32,7 @@ def got_expected_response(entries, command_id):
             event = json.loads(entry[event_id])
             pprint(event)
             if command_id == event_id.decode("utf-8"):
-
-                return True
+                return event['result']
 
 
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -44,7 +43,7 @@ command1 = {
     'name': 'get',
     'type': 'query',
     'params': {
-        'aggregate_id': 'Igor'
+        'argument': 0
     }
 }
 
@@ -53,7 +52,7 @@ command2 = {
     'name': 'calculate-double',
     'type': 'command',
     'params': {
-        'value': 42
+        'argument': 0
     }
 }
 command3 = {
@@ -61,7 +60,7 @@ command3 = {
     'name': 'calculate-power',
     'type': 'command',
     'params': {
-        'value': 42
+        'argument': 0
     }
 }
 command4 = {
@@ -69,9 +68,10 @@ command4 = {
     'name': 'get_all',
     'type': 'query',
     'params': {
-        'aggregate_id': 'Igor'
+        'argument': 0
     }
 }
+
 
 def logger(filename, text):
     if filename:
@@ -80,15 +80,21 @@ def logger(filename, text):
     else:
         print(text)
 
+
 # получить id последней записи из очереди events-tenant1
 # в принципе, он может как-нибудь по другому поддерживать
 # id последнего события, которое он видел
 try:
-    r.xgroup_create('events', client_id, mkstream=True) # будем подтверждать чтение?
+    r.xgroup_create('events', client_id, mkstream=True)  # будем подтверждать чтение?
 except:
     pass
 
 last_seen = '$'
+res = {}
+res['tenant_1'] = 0
+res['tenant_2'] = 0
+res['tenant_3'] = 0
+
 for x in range(0, 20):
     command = copy(random.choice([command1, command2, command3, command4]))
     tenant_id = random.choice(['tenant_1', 'tenant_2', 'tenant_3'])
@@ -96,21 +102,26 @@ for x in range(0, 20):
     command['tenant_id'] = tenant_id
     command['id'] = f'cmd-{tenant_id}-{counter}'
     command['response-to'] = f"response-{client_id}"
+    command['params']['argument'] = res[tenant_id]
     start = datetime.now()
-    for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
-        logger(f, f"client-{client_id} S {start} {command['id']} {command['name']}")
+    # for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
+    #     logger(f, f"client-{client_id} S {start} {command['id']} {command['name']}")
     message_id = r.xadd(subsystem, {command['id']: json.dumps(command)})
 
     # считывать ответы после last_id
     # когда мы видим событие, которое ждём, то можно выходить
-    while True: # TODO возможно, нужно выгребать старые сообщения тоже, плюс будет нужен таймаут
+    while True:  # TODO возможно, нужно выгребать старые сообщения тоже, плюс будет нужен таймаут
         print('wait for response')
-        _, entries = r.xread({f"response-{client_id}": last_seen}, count=1, block=300)[0]  # or timeout?
-        # entries = r.xrange(f"response-{client_id}", '-', '+', count=1)
-        if got_expected_response(entries, command['id']):
-            end = datetime.now()
-            for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
-                logger(f, f"client-{client_id} F {end} {command['id']} {command['name']}")
-            break
-        sleep(0.1)
+        read = r.xread({f"response-{client_id}": last_seen}, count=1, block=300)  # or timeout?
+        if read:
+            _, entries = read[0]
+            # entries = r.xrange(f"response-{client_id}", '-', '+', count=1)
+            result = got_expected_response(entries, command['id'])
+            if result is not None:
+                end = datetime.now()
+                for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
+                    logger(f, f"client-{client_id} F {end} {command['id']} {command['name']} {result}")
+                res[tenant_id] = result
+                break
+            sleep(0.1)
 r.xgroup_destroy('events', client_id)
