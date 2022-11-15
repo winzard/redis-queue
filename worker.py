@@ -46,12 +46,12 @@ def get_all(argument):
 
 def calculate_double(argument):
     result = fibonacci(random.randint(1, 15))
-    return argument + 1
+    return argument
 
 
 def calculate_power(argument):
     result = fibonacci(random.randint(1, 15))
-    return argument + 1
+    return argument
 
 
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -116,8 +116,8 @@ def process_commands(entries, dispatch=True):
             tenant_id = command['tenant_id']
             if not dispatch or command_type == 'query' or not dispatched(message_id, tenant_id, command_id):
                 start_time = datetime.now()
-                # for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
-                #     logger(f, f"worker-{subsystem}-{consumer_id} S {start_time} {command['id']} {command['name']}")
+                for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
+                    logger(f, f"worker-{subsystem}-{consumer_id} S {start_time} {command['id']} {command['name']}")
                 pprint(command)
                 if command['name'] == 'get':
                     argument = command['params']['argument']
@@ -180,14 +180,6 @@ for f in [None, 'worker.txt', f"worker-{subsystem}-{consumer_id}.txt"]:
            f'{consumer_id} обработчик запущен {start_time} ....')
 
 while True:
-    print('новый цикл')
-    entries = r.xreadgroup(group_name, consumer_id, {subsystem: last_seen}, count=1, block=3000)  # or block None??
-
-    print(entries)
-    if entries:
-        _, commands = entries[0]
-        process_commands(commands)
-    sleep(0.1)  # ждем, чтобы tsd было больше 1 мс
     print('обработка переданных')
     entries = r.xpending_range(subsystem, group_name, '-', '+', 20, consumername=consumer_id)
 
@@ -195,8 +187,17 @@ while True:
         request_id = message['message_id'].decode("utf-8")
         entries = r.xrange(subsystem, request_id, request_id)
         if entries:
-            process_commands(entries, dispatch=False)
+            process_commands(entries, dispatch=True) # передиспатчиваем и тут
         else:
             for f in [None, "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
                 logger(f, f'{consumer_id} обработчик удаляет сообщение {request_id}')
             r.xdel(subsystem, request_id)
+    print('новый цикл')
+    entries = r.xreadgroup(group_name, consumer_id, {subsystem: last_seen}, count=1, block=3000)  # or block None??
+    # полученные сообщения попадают в PEL и другие консумеры считают, что этот воркер их обрабатывает
+    print(entries)
+    if entries:
+        _, commands = entries[0]
+        process_commands(commands)
+    sleep(0.1)  # ждем, чтобы tsd было больше 1 мс
+

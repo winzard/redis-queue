@@ -90,29 +90,29 @@ except:
     pass
 
 last_seen = '$'
-res = {}
-res['tenant_1'] = 0
-res['tenant_2'] = 0
-res['tenant_3'] = 0
 
 for x in range(0, 20):
     command = copy(random.choice([command1, command2, command3, command4]))
     tenant_id = random.choice(['tenant_1', 'tenant_2', 'tenant_3'])
-    counter = r.incr(tenant_id, 1)
+    if command['type'] == 'query':
+        counter = r.incr(f'query-{tenant_id}', 1)
+        command['id'] = f'query-{tenant_id}-{counter}'
+    else:
+        counter = r.incr(f'command-{tenant_id}', 1)
+        command['id'] = f'command-{tenant_id}-{counter}'
     command['tenant_id'] = tenant_id
-    command['id'] = f'cmd-{tenant_id}-{counter}'
     command['response-to'] = f"response-{client_id}"
-    command['params']['argument'] = res[tenant_id]
+    command['params']['argument'] = counter
     start = datetime.now()
-    # for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
-    #     logger(f, f"client-{client_id} S {start} {command['id']} {command['name']}")
+    for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
+        logger(f, f"client-{client_id} S {start} {command['id']} {command['name']}")
     message_id = r.xadd(subsystem, {command['id']: json.dumps(command)})
 
     # считывать ответы после last_id
     # когда мы видим событие, которое ждём, то можно выходить
     while True:  # TODO возможно, нужно выгребать старые сообщения тоже, плюс будет нужен таймаут
         print('wait for response')
-        read = r.xread({f"response-{client_id}": last_seen}, count=1, block=300)  # or timeout?
+        read = r.xread({f"response-{client_id}": last_seen}, count=1, block=0)  # or timeout?
         if read:
             _, entries = read[0]
             # entries = r.xrange(f"response-{client_id}", '-', '+', count=1)
@@ -121,7 +121,6 @@ for x in range(0, 20):
                 end = datetime.now()
                 for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
                     logger(f, f"client-{client_id} F {end} {command['id']} {command['name']} {result}")
-                res[tenant_id] = result
                 break
             sleep(0.1)
 r.xgroup_destroy('events', client_id)
