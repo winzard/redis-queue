@@ -33,6 +33,12 @@ def fibonacci(n):
             sleep(1)
         return b
 
+def check_pending(message_id, consumername):
+    pending_entries = r.xpending_range(subsystem, group_name, message_id, message_id, 1, consumername=consumername)
+    if pending_entries:
+        return True
+    else:
+        return False
 
 def get(tenant_id):
     counter = r.get(f'result-command-{tenant_id}').decode("utf-8")
@@ -48,15 +54,32 @@ def get_all(tenant_id):
     return f'{counter} {result}'
 
 
-def calculate_double(tenant_id):
-    counter = str(r.incr(f'result-command-{tenant_id}', 1))  # увеличиваем счетчик
-    fibonacci(random.randint(1, 15))  # длинная задача
-    result = r.get(f'result-command-{tenant_id}').decode("utf-8")
-    return f'{result} {result == counter}'
+def calculate_double(message_id, consumer_id, tenant_id):
+    try:
+        before = r.get(f'result-command-{tenant_id}').decode("utf-8")
+        pipe = r.pipeline()
+        pipe.incr(f'result-command-{tenant_id}', 1)  # увеличиваем счетчик
+        fibonacci(random.randint(1, 15))  # длинная задача
+        pipe.get(f'result-command-{tenant_id}') # получаем новое значение счетчика
+        if check_pending(message_id, consumer_id): # проверяем, актуальна ли задача
+            results = pipe.execute() # коммитим изменения
+            counter = str(results[0])
+            result = results[1].decode("utf-8")
+            return True, f'{before} {counter} {result} {result == counter}'
+        else:
+            # типа роллбэк
+            after = r.get(f'result-command-{tenant_id}').decode("utf-8")
+            return False, f'отмена задачи {before} {after}'
 
 
-def calculate_power(tenant_id):
-    return calculate_double(tenant_id)
+    except KeyboardInterrupt:
+        for f in [None, 'worker.txt', f"worker-{subsystem}-{consumer_id}.txt"]:
+            logger(f, f'{consumer_id} обработчик упал')
+        exit()
+
+
+def calculate_power(message_id, consumer_id, tenant_id):
+    return calculate_double(message_id, consumer_id, tenant_id)
 
 
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -65,6 +88,11 @@ subsystem = str(sys.argv[1])  # название подсистемы, оно ж
 consumer_id = str(sys.argv[2])  # идентификатор воркера
 group_name = 'workers'  # общее для всех воркеров системы
 
+COMMAND_TIMEOUT_MILLISECONDS = 5000  # таймаут команды
+#COMMAND_TIMEOUT_MILLISECONDS = 30000  # таймаут команды
+WORKER_TIMEOUT_MILLISECONDS = 3600000  # таймаут воркера, после которого он удаляется из consumers шины
+MESSAGE_QUEUE_SIZE = 20  # как далеко мы смотрим в историю сообщений. Возможно, это зависит от числа воркеров
+BLOCK_TIME_MILLISECONDS = 3000
 
 def logger(filename, text):
     if filename:
@@ -77,7 +105,7 @@ def logger(filename, text):
 # todo происходит racing, когда один воркер еще не передал команду тенанта другому, а третий считает, что этот первый
 #  обрабатывает команду и клеймит на него
 def dispatched(message_id, tenant_id, command_id) -> bool:
-    pending_entries = r.xpending_range(subsystem, group_name, '-', message_id, 20)
+    pending_entries = r.xpending_range(subsystem, group_name, '-', message_id, MESSAGE_QUEUE_SIZE)
     if not pending_entries:
         return False
     print(f'Всего сообщений {len(pending_entries)}')
@@ -148,23 +176,29 @@ def process_commands(entries, dispatch=True):
                     end_command(command, command_id, message_id, response, tenant_id, result)
                 elif command['name'] == 'calculate-double':
                     argument = command['params']['argument']
-                    result = calculate_double(tenant_id)
-                    response = {
-                        'id': command_id.decode("utf-8"),
-                        'tenand_id': tenant_id,
-                        'name': 'calculate-double-completed',
-                        'result': result
-                    }
+                    finished, result = calculate_double(message_id, consumer_id, tenant_id)
+                    if finished:
+                        response = {
+                            'id': command_id.decode("utf-8"),
+                            'tenand_id': tenant_id,
+                            'name': 'calculate-double-completed',
+                            'result': result
+                        }
+                    else:
+                        response = None
                     end_command(command, command_id, message_id, response, tenant_id, result)
                 elif command['name'] == 'calculate-power':
                     argument = command['params']['argument']
-                    result = calculate_power(tenant_id)
-                    response = {
-                        'id': command_id.decode("utf-8"),
-                        'tenand_id': tenant_id,
-                        'name': 'calculate-power-completed',
-                        'result': result
-                    }
+                    finished, result = calculate_power(message_id, consumer_id, tenant_id)
+                    if finished:
+                        response = {
+                            'id': command_id.decode("utf-8"),
+                            'tenand_id': tenant_id,
+                            'name': 'calculate-power-completed',
+                            'result': result
+                        }
+                    else:
+                        response = None
                     end_command(command, command_id, message_id, response, tenant_id, result)
 
 
@@ -172,11 +206,13 @@ def end_command(command, command_id, message_id, response, tenant_id, result):
     end_time = datetime.now()
     for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
         logger(f, f"worker-{subsystem}-{consumer_id} F {end_time} {command['id']} {command['name']} {result}")
-        r.xadd(
-            command['response-to'],
-            {command_id: json.dumps(response)}
-        )
-    r.xack(subsystem, group_name, message_id)
+        if response:
+            r.xadd(
+                command['response-to'],
+                {command_id: json.dumps(response)}
+            )
+    if response:
+        r.xack(subsystem, group_name, message_id)
 
 
 try:
@@ -191,8 +227,28 @@ for f in [None, 'worker.txt', f"worker-{subsystem}-{consumer_id}.txt"]:
            f'{consumer_id} обработчик запущен {start_time} ....')
 
 while True:
+    print('обработка зависших')
+    consumers = r.xinfo_consumers(subsystem, group_name)
+    for info in consumers:
+        idle_time = info['idle']
+        pending_messages = info['pending']
+        consumer = info['name']
+        if pending_messages == 0 and idle_time > WORKER_TIMEOUT_MILLISECONDS:
+            for f in [None, "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
+                logger(f, f'{consumer_id} обработчик удаляет отвалившийся обработчик {consumer}')
+            r.xgroup_delconsumer(subsystem, group_name, consumer)
+        if pending_messages and idle_time > COMMAND_TIMEOUT_MILLISECONDS:
+            # забираем себе закисшие команды. TODO а что будет, если зависли команды разных тенантов?
+            entries = r.xpending_range(subsystem, group_name, '-', '+', MESSAGE_QUEUE_SIZE, consumername=consumer)
+            message_ids = [message['message_id'] for message in entries]
+            if message_ids:
+                r.xclaim(subsystem, group_name, consumer_id, 1, message_ids)
+                for f in [None, 'worker.txt', f"worker-{subsystem}-{consumer_id}.txt"]:
+                    logger(f,
+                           f'{consumer_id} обработчик забирает себе обработку сообщений обработчика {consumer}, потому что он упал')
+
     print('обработка переданных')
-    entries = r.xpending_range(subsystem, group_name, '-', '+', 20, consumername=consumer_id)
+    entries = r.xpending_range(subsystem, group_name, '-', '+', MESSAGE_QUEUE_SIZE, consumername=consumer_id)
 
     for message in entries:  # todo time_since_delivered
         request_id = message['message_id'].decode("utf-8")
@@ -204,7 +260,8 @@ while True:
                 logger(f, f'{consumer_id} обработчик удаляет сообщение {request_id}')
             r.xdel(subsystem, request_id)
     print('новый цикл')
-    entries = r.xreadgroup(group_name, consumer_id, {subsystem: last_seen}, count=1, block=3000)  # or block None??
+    # TODO last_seen должен же меняться
+    entries = r.xreadgroup(group_name, consumer_id, {subsystem: last_seen}, count=1, block=BLOCK_TIME_MILLISECONDS)  # or block None??
     # полученные сообщения попадают в PEL и другие консумеры считают, что этот воркер их обрабатывает
     print(entries)
     if entries:

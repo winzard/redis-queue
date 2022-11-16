@@ -32,7 +32,8 @@ def got_expected_response(entries, command_id):
             event = json.loads(entry[event_id])
             pprint(event)
             if command_id == event_id.decode("utf-8"):
-                return event['result']
+                return event['result'], message_id
+    return None, message_id
 
 
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -116,7 +117,7 @@ for x in range(0, 20):
         if read:
             _, entries = read[0]
             # entries = r.xrange(f"response-{client_id}", '-', '+', count=1)
-            result = got_expected_response(entries, command['id'])
+            result, last_seen = got_expected_response(entries, command['id'])
             if result is not None:
                 end = datetime.now()
                 for f in [None, f"{tenant_id}.txt", f"client-{client_id}.txt"]:
