@@ -34,7 +34,7 @@ def fibonacci(n):
         return b
 
 def check_pending(message_id, consumername):
-    pending_entries = r.xpending_range(subsystem, group_name, message_id, message_id, 1, consumername=consumername)
+    pending_entries = r.xpending_range(subsystem, group_name, message_id, message_id, 1) # а вот без консумера, consumername=consumername)
     if pending_entries:
         return True
     else:
