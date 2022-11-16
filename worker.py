@@ -35,24 +35,28 @@ def fibonacci(n):
 
 
 def get(tenant_id):
-    result = fibonacci(1)  # надо чем-то занять
-    return r.get(f'query-{tenant_id}').decode("utf-8")
-
+    counter = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    fibonacci(1)  # надо чем-то занять
+    result = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    return f'{counter} {result}'
 
 
 def get_all(tenant_id):
-    result = fibonacci(4)  # надо чем-то занять
-    return r.get(f'query-{tenant_id}').decode("utf-8")
+    counter = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    fibonacci(4)  # надо чем-то занять
+    result = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    return f'{counter} {result}'
 
 
 def calculate_double(tenant_id):
-    result = fibonacci(random.randint(1, 15))
-    return r.get(f'command-{tenant_id}').decode("utf-8")
+    counter = str(r.incr(f'result-command-{tenant_id}', 1))  # увеличиваем счетчик
+    fibonacci(random.randint(1, 15))  # длинная задача
+    result = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    return f'{result} {result == counter}'
 
 
 def calculate_power(tenant_id):
-    result = fibonacci(random.randint(1, 15))
-    return r.get(f'command-{tenant_id}').decode("utf-8")
+    return calculate_double(tenant_id)
 
 
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -68,6 +72,7 @@ def logger(filename, text):
             print(text, file=log)
     else:
         print(text)
+
 
 # todo происходит racing, когда один воркер еще не передал команду тенанта другому, а третий считает, что этот первый
 #  обрабатывает команду и клеймит на него
@@ -92,7 +97,8 @@ def dispatched(message_id, tenant_id, command_id) -> bool:
                 _command = json.loads(entry[_command_id])
                 _tenant_id = _command['tenant_id']
                 if tenant_id == _tenant_id and \
-                        _command['type'] != 'query':  # кто-то уже обрабатывает команду для этого тенанта и это не запрос
+                        _command[
+                            'type'] != 'query':  # кто-то уже обрабатывает команду для этого тенанта и это не запрос
                     r.xclaim(subsystem, group_name, other_worker, 1, [message_id])
                     for f in [None, 'worker.txt', f"worker-{subsystem}-{consumer_id}.txt"]:
                         logger(f,
@@ -122,46 +128,50 @@ def process_commands(entries, dispatch=True):
                 pprint(command)
                 if command['name'] == 'get':
                     argument = command['params']['argument']
+                    result = get(tenant_id)
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenant_id': tenant_id,
                         'name': 'get-completed',
-                        'result': get(tenant_id)
+                        'result': result
                     }
-                    end_command(command, command_id, message_id, response, tenant_id)
+                    end_command(command, command_id, message_id, response, tenant_id, result)
                 elif command['name'] == 'get_all':
                     argument = command['params']['argument']
+                    result = get_all(tenant_id)
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenant_id': tenant_id,
                         'name': 'get_all-completed',
-                        'result': get_all(tenant_id)
+                        'result': result
                     }
-                    end_command(command, command_id, message_id, response, tenant_id)
+                    end_command(command, command_id, message_id, response, tenant_id, result)
                 elif command['name'] == 'calculate-double':
                     argument = command['params']['argument']
+                    result = calculate_double(tenant_id)
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenand_id': tenant_id,
                         'name': 'calculate-double-completed',
-                        'result': calculate_double(tenant_id)
+                        'result': result
                     }
-                    end_command(command, command_id, message_id, response, tenant_id)
+                    end_command(command, command_id, message_id, response, tenant_id, result)
                 elif command['name'] == 'calculate-power':
                     argument = command['params']['argument']
+                    result = calculate_power(tenant_id)
                     response = {
                         'id': command_id.decode("utf-8"),
                         'tenand_id': tenant_id,
                         'name': 'calculate-power-completed',
-                        'result': calculate_power(tenant_id)
+                        'result': result
                     }
-                    end_command(command, command_id, message_id, response, tenant_id)
+                    end_command(command, command_id, message_id, response, tenant_id, result)
 
 
-def end_command(command, command_id, message_id, response, tenant_id):
+def end_command(command, command_id, message_id, response, tenant_id, result):
     end_time = datetime.now()
     for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
-        logger(f, f"worker-{subsystem}-{consumer_id} F {end_time} {command['id']} {command['name']}")
+        logger(f, f"worker-{subsystem}-{consumer_id} F {end_time} {command['id']} {command['name']} {result}")
         r.xadd(
             command['response-to'],
             {command_id: json.dumps(response)}
@@ -188,7 +198,7 @@ while True:
         request_id = message['message_id'].decode("utf-8")
         entries = r.xrange(subsystem, request_id, request_id)
         if entries:
-            process_commands(entries, dispatch=True) # передиспатчиваем и тут
+            process_commands(entries, dispatch=True)  # передиспатчиваем и тут
         else:
             for f in [None, "worker.txt", f"worker-{subsystem}-{consumer_id}.txt"]:
                 logger(f, f'{consumer_id} обработчик удаляет сообщение {request_id}')
@@ -201,4 +211,3 @@ while True:
         _, commands = entries[0]
         process_commands(commands)
     sleep(0.1)  # ждем, чтобы tsd было больше 1 мс
-
