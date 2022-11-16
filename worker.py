@@ -34,24 +34,25 @@ def fibonacci(n):
         return b
 
 
-def get(argument):
-    result = fibonacci(2)  # надо чем-то занять
-    return argument
+def get(tenant_id):
+    result = fibonacci(1)  # надо чем-то занять
+    return r.get(f'query-{tenant_id}').decode("utf-8")
 
 
-def get_all(argument):
+
+def get_all(tenant_id):
     result = fibonacci(4)  # надо чем-то занять
-    return argument
+    return r.get(f'query-{tenant_id}').decode("utf-8")
 
 
-def calculate_double(argument):
+def calculate_double(tenant_id):
     result = fibonacci(random.randint(1, 15))
-    return argument
+    return r.get(f'command-{tenant_id}').decode("utf-8")
 
 
-def calculate_power(argument):
+def calculate_power(tenant_id):
     result = fibonacci(random.randint(1, 15))
-    return argument
+    return r.get(f'command-{tenant_id}').decode("utf-8")
 
 
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
@@ -125,7 +126,7 @@ def process_commands(entries, dispatch=True):
                         'id': command_id.decode("utf-8"),
                         'tenant_id': tenant_id,
                         'name': 'get-completed',
-                        'result': get(argument)
+                        'result': get(tenant_id)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
                 elif command['name'] == 'get_all':
@@ -134,7 +135,7 @@ def process_commands(entries, dispatch=True):
                         'id': command_id.decode("utf-8"),
                         'tenant_id': tenant_id,
                         'name': 'get_all-completed',
-                        'result': get_all(argument)
+                        'result': get_all(tenant_id)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
                 elif command['name'] == 'calculate-double':
@@ -143,7 +144,7 @@ def process_commands(entries, dispatch=True):
                         'id': command_id.decode("utf-8"),
                         'tenand_id': tenant_id,
                         'name': 'calculate-double-completed',
-                        'result': calculate_double(argument)
+                        'result': calculate_double(tenant_id)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
                 elif command['name'] == 'calculate-power':
@@ -152,7 +153,7 @@ def process_commands(entries, dispatch=True):
                         'id': command_id.decode("utf-8"),
                         'tenand_id': tenant_id,
                         'name': 'calculate-power-completed',
-                        'result': calculate_power(argument)
+                        'result': calculate_power(tenant_id)
                     }
                     end_command(command, command_id, message_id, response, tenant_id)
 
