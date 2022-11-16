@@ -124,7 +124,7 @@ def dispatched(message_id, tenant_id, command_id) -> bool:
             for _command_id in entry:
                 _command = json.loads(entry[_command_id])
                 _tenant_id = _command['tenant_id']
-                if tenant_id == _tenant_id and \
+                if _command_id!= command_id and tenant_id == _tenant_id and \
                         _command[
                             'type'] != 'query':  # кто-то уже обрабатывает команду для этого тенанта и это не запрос
                     r.xclaim(subsystem, group_name, other_worker, 1, [message_id])
