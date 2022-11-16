@@ -248,7 +248,7 @@ while True:
                            f'{consumer_id} обработчик забирает себе обработку сообщений обработчика {consumer}, потому что он упал')
 
     print('обработка переданных')
-    entries = r.xpending_range(subsystem, group_name, '-', '+', MESSAGE_QUEUE_SIZE, consumername=consumer_id)
+    entries = r.xpending_range(subsystem, group_name, '-', '+', 1, consumername=consumer_id) # по одному, потому что может там отвис обработчик
 
     for message in entries:  # todo time_since_delivered
         request_id = message['message_id'].decode("utf-8")
