@@ -41,22 +41,27 @@ def check_pending(message_id, consumername):
         return False
 
 def get(tenant_id):
-    counter = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    before = r.get(f'result-command-{tenant_id}')
+    counter = before.decode("utf-8") if before else '0'
     fibonacci(1)  # надо чем-то занять
-    result = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    after = r.get(f'result-command-{tenant_id}')
+    result = after.decode("utf-8") if after else '0'
     return f'{counter} {result}'
 
 
 def get_all(tenant_id):
-    counter = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    before = r.get(f'result-command-{tenant_id}')
+    counter = before.decode("utf-8") if before else '0'
     fibonacci(4)  # надо чем-то занять
-    result = r.get(f'result-command-{tenant_id}').decode("utf-8")
+    after = r.get(f'result-command-{tenant_id}')
+    result = after.decode("utf-8") if after else '0'
     return f'{counter} {result}'
 
 
 def calculate_double(message_id, consumer_id, tenant_id):
     try:
-        before = r.get(f'result-command-{tenant_id}').decode("utf-8")
+        _before = r.get(f'result-command-{tenant_id}')
+        before = _before.decode("utf-8") if _before else '0'
         pipe = r.pipeline()
         pipe.incr(f'result-command-{tenant_id}', 1)  # увеличиваем счетчик
         fibonacci(random.randint(1, 15))  # длинная задача
@@ -68,7 +73,8 @@ def calculate_double(message_id, consumer_id, tenant_id):
             return True, f'{before} {counter} {result} {result == counter}'
         else:
             # типа роллбэк
-            after = r.get(f'result-command-{tenant_id}').decode("utf-8")
+            _after = r.get(f'result-command-{tenant_id}')
+            after = _after.decode("utf-8") if _after else '0'
             return False, f'отмена задачи {before} {after}'
 
 
