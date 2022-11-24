@@ -7,16 +7,138 @@ $ python3 worker.py 1
 
 import json
 import os
-import uuid
 from datetime import datetime
 from pprint import pprint
 import random
 from time import sleep
 import sys
 import redis
+import sqlite3
+import transaction
+from transaction.interfaces import IDataManager, DoomedTransaction
+from zope.interface import implementer
+
+from channel import Channel
+
+REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
 
 
-def fibonacci(n):
+@implementer(IDataManager)
+class DataManager(object):
+    """ Sample data manager.
+
+    Used by the 'datamanager' chapter in the Sphinx docs.
+    """
+
+    def __init__(self, worker):
+        self.state = 0
+        self.sp = 0
+        self.transaction = None
+        self.delta = 0
+        self.txn_state = None
+        self.begun = False
+        self.worker = worker
+        self.connection = sqlite3.connect("example.db")
+        cur = self.connection.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS result(tenant_id TEXT PRIMARY KEY, command TEXT DEFAULT '');")
+        cur.close()
+        self.connection.commit()
+
+    def _check_state(self, *ok_states):
+        if self.txn_state not in ok_states:
+            raise ValueError("txn in state %r but expected one of %r" %
+                             (self.txn_state, ok_states))
+
+    def _checkTransaction(self, transaction):
+        if (transaction is not self.transaction
+                and self.transaction is not None):
+            raise TypeError("Transaction missmatch",
+                            transaction, self.transaction)
+
+    def inc(self, tenant_id, value):
+        cur = self.connection.cursor()
+        sql = f"INSERT INTO result(tenant_id) VALUES('{tenant_id}') ON CONFLICT(tenant_id) DO UPDATE SET command = '{value}';"
+        cur.execute(sql)
+        cur.close()
+
+    def get(self, tenant_id):
+        cur = self.connection.cursor()
+        res = cur.execute(f"SELECT command FROM result WHERE tenant_id = '{tenant_id}';")
+        result = res.fetchone()
+        cur.close()
+        if result:
+            return result[0]
+        else:
+            return None
+
+    def tpc_begin(self, transaction):
+        print('tcp_begin')
+        self._checkTransaction(transaction)
+        self._check_state(None)
+        self.transaction = transaction
+        self.txn_state = 'tpc_begin'
+        self.begun = True
+
+    def tpc_vote(self, transaction):
+        print('tcp_vote start')
+        self._checkTransaction(transaction)
+        self._check_state('tpc_begin')
+        if not self.worker.is_job_exists(transaction.data('message_id')):
+            print('doom')
+            raise DoomedTransaction()
+        self.state += self.delta
+        self.txn_state = 'tpc_vote'
+        print('tcp_vote end')
+
+    def tpc_finish(self, transaction):
+        print('tcp_finish')
+        self._checkTransaction(transaction)
+        self._check_state('tpc_vote')
+        self.delta = 0
+        self.transaction = None
+        self.txn_state = None
+        self.connection.commit()
+        for f in [None, "worker.txt", f"worker-{self.worker.subsystem}-{self.worker.consumer_id}.txt"]:
+            logger(f,
+                   f"worker-{self.worker.subsystem}-{self.worker.consumer_id} КОММИТ {transaction.data('command_id')}")
+
+    def tpc_abort(self, transaction):
+        print('tcp_abort')
+        self._checkTransaction(transaction)
+        if self.transaction is not None:
+            self.transaction = None
+
+        if self.txn_state == 'tpc_vote':
+            self.state -= self.delta
+
+        self.txn_state = None
+        self.delta = 0
+
+    def abort(self, transaction):
+        print('abort')
+        self._checkTransaction(transaction)
+        if self.transaction is not None:
+            self.transaction = None
+
+        if self.begun:
+            self.state -= self.delta
+            self.begun = False
+
+        self.delta = 0
+        self.connection.rollback()
+        for f in [None, "worker.txt", f"worker-{self.worker.subsystem}-{self.worker.consumer_id}.txt"]:
+            logger(f,
+                   f"worker-{self.worker.subsystem}-{self.worker.consumer_id} ОТМЕНА {transaction.data('command_id')}")
+
+    def commit(self, transaction):
+        print('commit')
+        if not self.begun:
+            raise TypeError('Not prepared to commit')
+        self._checkTransaction(transaction)
+        self.transaction = None
+
+
+def fibonacci(n, worker=None):
     a = 0
     b = 1
     if n < 0:
@@ -30,37 +152,28 @@ def fibonacci(n):
             c = a + b
             a = b
             b = c
-            sleep(1)
+            sleep(0.1)
+            # if worker:
+            #     worker.i_am_alive() # сообщаем, что живы и работаем. В этом случае задача не должна перехватываться
         return b
 
 
-def get(tenant_id):
-    before = r.get(f'result-command-{tenant_id}')
-    counter = before.decode("utf-8") if before else '0'
+def get(data_manager, tenant_id):
+    before = data_manager.get(tenant_id)
     fibonacci(1)  # надо чем-то занять
-    after = r.get(f'result-command-{tenant_id}')
-    result = after.decode("utf-8") if after else '0'
-    return f'{counter} {result}'
+    after = data_manager.get(tenant_id)
+    return f'{before} to {after}'
+
+def change(data_manager, tenant_id, argument):
+    before = data_manager.get(tenant_id)
+    data_manager.inc(tenant_id, argument)  # увеличиваем счетчик
+    fibonacci(random.randint(1, 15), data_manager.worker)  # длинная задача
+    after = data_manager.get(tenant_id)
+    return f'{before} to {after}'
 
 
-def get_all(tenant_id):
-    before = r.get(f'result-command-{tenant_id}')
-    counter = before.decode("utf-8") if before else '0'
-    fibonacci(4)  # надо чем-то занять
-    after = r.get(f'result-command-{tenant_id}')
-    result = after.decode("utf-8") if after else '0'
-    return f'{counter} {result}'
-
-
-REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
-r = redis.Redis(host=REDIS_HOST, port=6379, db=0)
 group_name = 'workers'  # общее для всех воркеров системы
 
-COMMAND_TIMEOUT_MILLISECONDS = 5000  # таймаут команды
-#COMMAND_TIMEOUT_MILLISECONDS = 30000  # таймаут команды
-WORKER_TIMEOUT_MILLISECONDS = 3600000  # таймаут воркера, после которого он удаляется из consumers шины
-MESSAGE_QUEUE_SIZE = 20  # как далеко мы смотрим в историю сообщений. Возможно, это зависит от числа воркеров
-BLOCK_TIME_MILLISECONDS = 3000
 
 def logger(filename, text):
     if filename:
@@ -75,206 +188,101 @@ class Worker:
     def __init__(self, subsystem: str, consumer_id: str):
         self.subsystem = subsystem
         self.consumer_id = consumer_id
+        self.redis_data_manager = DataManager(self)
+        self.channel = Channel(subsystem, group_name)
 
-    # todo происходит racing, когда один воркер еще не передал команду тенанта другому, а третий считает, что этот первый
-    #  обрабатывает команду и клеймит на него
-    def dispatched(self, message_id, tenant_id, command_id) -> bool:
-        pending_entries = r.xpending_range(self.subsystem, group_name, '-', message_id, MESSAGE_QUEUE_SIZE)
-        if not pending_entries:
-            return False
-        print(f'Всего сообщений {len(pending_entries)}')
-        print(f'{self.consumer_id} Обработка команды:', message_id, command_id)
-        for message in pending_entries:  # todo time_since_delivered если застряло
-            request_id = message['message_id']  # bytes
-            other_worker = message['consumer']  # bytes
-            print(f'{self.consumer_id} проверяет сообщение {request_id} для обработчика {other_worker}')
-            if self.consumer_id != other_worker.decode('utf-8'):  # в строку преобразуем
-                rng = r.xrange(self.subsystem, request_id, request_id, count=1)
-                if not rng:
-                    print(f'непонятно, почему нет сообщения')
-                    r.xack(self.subsystem, group_name, request_id)
-                    continue
-                _message_id, entry = rng[0]
-                for _command_id in entry:
-                    _command = json.loads(entry[_command_id])
-                    _tenant_id = _command['tenant_id']
-                    if _command_id != command_id and tenant_id == _tenant_id and \
-                            _command[
-                                'type'] != 'query':  # кто-то уже обрабатывает команду для этого тенанта и это не запрос
-                        r.xclaim(self.subsystem, group_name, other_worker, 1, [message_id])
-                        for f in [None, 'worker.txt', f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
-                            logger(f,
-                                   f'{self.consumer_id} обработчик передает обработку {command_id} для тенанта {tenant_id} обработчику {other_worker}, потому что он уже обрабатывает команду {_command_id}')
+    def process_message(self, message_id, command):
+        print(command)
+        command_id = command['id']
+        print('-' * 10)
+        print('Обработка команды:', message_id, command_id)
 
-                        return True
+        command_type = command['type']
+        tenant_id = command['tenant_id']
+        start_time = datetime.now()
+        for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
+            logger(f,
+                   f"worker-{self.subsystem}-{self.consumer_id} S {start_time} {command['id']} {command['name']}")
+        pprint(command)
+        response = None
+        if command_type == 'query':
+            # no transation
+            if command['name'] == 'get':
+                argument = command['params']['argument']
+                result = get(self.redis_data_manager, tenant_id)
+                response = {
+                    'id': command_id,
+                    'success': True,
+                    'tenant_id': tenant_id,
+                    'name': 'get-completed',
+                    'result': result
+                }
+        else:
+            tx = transaction.begin()
+            tx.set_data('message_id', message_id)  # как-то неровно это
+            tx.set_data('command_id', command_id)  # как-то неровно это
+            try:
+                tx.join(self.redis_data_manager)
+                if command['name'] == 'change':
+                    argument = command['params']['argument']
+                    result = change(self.redis_data_manager, tenant_id, command_id)
+                    if result:
+                        response = {
+                            'id': command_id,
+                            'success': True,
+                            'tenand_id': tenant_id,
+                            'name': 'change-completed',
+                            'result': result
+                        }
                     else:
-                        with open(f'{_tenant_id}.txt', 'a') as log:
-                            print(
-                                f'{self.consumer_id} обработчик установил, что команду {_command_id} для тенанта {_tenant_id} обрабатывает {other_worker}.',
-                                file=log)
-        return False
+                        response = None
+                tx.commit()
+            except Exception as e:
+                response = {
+                    'id': command_id,
+                    'success': False,
+                    'tenand_id': tenant_id,
+                    'name': 'change-completed',
+                    'result': e
+                }
+                print('exception', e)
+                tx.abort()
+        self.end_command(command, response, message_id)
 
-    def calculate_power(self, message_id, tenant_id):
-        return self.calculate_double(message_id, tenant_id)
-
-    def calculate_double(self, message_id, tenant_id):
-        try:
-            _before = r.get(f'result-command-{tenant_id}')
-            before = _before.decode("utf-8") if _before else '0'
-            pipe = r.pipeline()
-            pipe.incr(f'result-command-{tenant_id}', 1)  # увеличиваем счетчик
-            fibonacci(random.randint(1, 15))  # длинная задача
-            pipe.get(f'result-command-{tenant_id}')  # получаем новое значение счетчика
-            if self.check_pending(message_id, self.consumer_id):  # проверяем, актуальна ли задача
-                results = pipe.execute()  # коммитим изменения
-                counter = str(results[0])
-                result = results[1].decode("utf-8")
-                return True, f'{before} {counter} {result} {result == counter}'
-            else:
-                # типа роллбэк
-                _after = r.get(f'result-command-{tenant_id}')
-                after = _after.decode("utf-8") if _after else '0'
-                return False, f'отмена задачи {before} {after}'
-
-
-        except KeyboardInterrupt:
-            for f in [None, 'worker.txt', f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
-                logger(f, f'{self.consumer_id} обработчик упал')
-            exit()
-
-    def process_commands(self, entries, dispatch=True):
-        for message_id, entry in entries:
-            for command_id in entry:
-                print('-' * 10)
-                print('Обработка команды:', message_id, command_id)
-                command = json.loads(entry[command_id])
-                command_type = command['type']
-                tenant_id = command['tenant_id']
-                if not dispatch or command_type == 'query' or not self.dispatched(message_id, tenant_id, command_id):
-                    start_time = datetime.now()
-                    for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
-                        logger(f, f"worker-{self.subsystem}-{self.consumer_id} S {start_time} {command['id']} {command['name']}")
-                    pprint(command)
-                    if command['name'] == 'get':
-                        argument = command['params']['argument']
-                        result = get(tenant_id)
-                        response = {
-                            'id': command_id.decode("utf-8"),
-                            'tenant_id': tenant_id,
-                            'name': 'get-completed',
-                            'result': result
-                        }
-                        self.end_command(command, command_id, message_id, response, tenant_id, result)
-                    elif command['name'] == 'get_all':
-                        argument = command['params']['argument']
-                        result = get_all(tenant_id)
-                        response = {
-                            'id': command_id.decode("utf-8"),
-                            'tenant_id': tenant_id,
-                            'name': 'get_all-completed',
-                            'result': result
-                        }
-                        self.end_command(command, command_id, message_id, response, tenant_id, result)
-                    elif command['name'] == 'calculate-double':
-                        argument = command['params']['argument']
-                        finished, result = self.calculate_double(message_id, tenant_id)
-                        if finished:
-                            response = {
-                                'id': command_id.decode("utf-8"),
-                                'tenand_id': tenant_id,
-                                'name': 'calculate-double-completed',
-                                'result': result
-                            }
-                        else:
-                            response = None
-                        self.end_command(command, command_id, message_id, response, tenant_id, result)
-                    elif command['name'] == 'calculate-power':
-                        argument = command['params']['argument']
-                        finished, result = self.calculate_power(message_id, tenant_id)
-                        if finished:
-                            response = {
-                                'id': command_id.decode("utf-8"),
-                                'tenand_id': tenant_id,
-                                'name': 'calculate-power-completed',
-                                'result': result
-                            }
-                        else:
-                            response = None
-                        self.end_command(command, command_id, message_id, response, tenant_id, result)
-
-    def end_command(self, command, command_id, message_id, response, tenant_id, result):
+    def end_command(self, command, response, message_id):
+        command_id = command['id']
+        tenant_id = command['tenant_id']
+        result = response['result'] if response else 'ОТМЕНА'
         end_time = datetime.now()
         for f in [None, f"{tenant_id}.txt", "worker.txt", f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
-            logger(f, f"worker-{self.subsystem}-{self.consumer_id} F {end_time} {command['id']} {command['name']} {result}")
-            if response:
-                r.xadd(
-                    command['response-to'],
-                    {command_id: json.dumps(response)}
-                )
-        if response:
-            r.xack(self.subsystem, group_name, message_id)
+            logger(f,
+                   f"worker-{self.subsystem}-{self.consumer_id} F {end_time} {command_id} {command['name']} {result}")
+        if response['success']:
+            self.channel.send(
+                command['response-to'],
+                {command_id: json.dumps(response)}
+            )
+            self.channel.acknowledge(message_id)
 
-    def check_pending(self, message_id, consumername):
-        pending_entries = r.xpending_range(self.subsystem, group_name, message_id, message_id,
-                                           1)  # а вот без консумера, consumername=consumername)
-        if pending_entries:
-            return True
-        else:
-            return False
+    def is_job_exists(self, message_id):
+        return self.channel.is_pending(message_id)
+
+    def i_am_alive(self):
+        return self.channel.ping(self.consumer_id)
 
     def routine(self):
-        try:
-            r.xgroup_create(self.subsystem, group_name, mkstream=True)
-        except:
-            pass
-
-        last_seen = '>'
         start_time = datetime.now()
         for f in [None, 'worker.txt', f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
             logger(f,
                    f'{self.consumer_id} обработчик запущен {start_time} ....')
-
         while True:
-            print('обработка зависших')
-            consumers = r.xinfo_consumers(self.subsystem, group_name)
-            for info in consumers:
-                idle_time = info['idle']
-                pending_messages = info['pending']
-                consumer = info['name']
-                if pending_messages == 0 and idle_time > WORKER_TIMEOUT_MILLISECONDS:
-                    for f in [None, "worker.txt", f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
-                        logger(f, f'{self.consumer_id} обработчик удаляет отвалившийся обработчик {consumer}')
-                    r.xgroup_delconsumer(self.subsystem, group_name, consumer)
-                if pending_messages and idle_time > COMMAND_TIMEOUT_MILLISECONDS:
-                    # забираем себе закисшие команды. TODO а что будет, если зависли команды разных тенантов?
-                    entries = r.xpending_range(self.subsystem, group_name, '-', '+', MESSAGE_QUEUE_SIZE, consumername=consumer)
-                    message_ids = [message['message_id'] for message in entries]
-                    if message_ids:
-                        r.xclaim(self.subsystem, group_name, self.consumer_id, 1, message_ids)
-                        for f in [None, 'worker.txt', f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
-                            logger(f,
-                                   f'{self.consumer_id} обработчик забирает себе обработку сообщений обработчика {consumer}, потому что он упал')
-
-            print('обработка переданных')
-            entries = r.xpending_range(self.subsystem, group_name, '-', '+', 1, consumername=self.consumer_id) # по одному, потому что может там отвис обработчик
-
-            for message in entries:  # todo time_since_delivered
-                request_id = message['message_id'].decode("utf-8")
-                entries = r.xrange(self.subsystem, request_id, request_id)
-                if entries:
-                    self.process_commands(entries, dispatch=True)  # передиспатчиваем и тут
-                else:
-                    for f in [None, "worker.txt", f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
-                        logger(f, f'{self.consumer_id} обработчик удаляет сообщение {request_id}')
-                    r.xdel(self.subsystem, request_id)
-            print('новый цикл')
-            # TODO last_seen должен же меняться
-            entries = r.xreadgroup(group_name, self.consumer_id, {self.subsystem: last_seen}, count=1, block=BLOCK_TIME_MILLISECONDS)  # or block None??
-            # полученные сообщения попадают в PEL и другие консумеры считают, что этот воркер их обрабатывает
-            print(entries)
-            if entries:
-                _, commands = entries[0]
-                self.process_commands(commands)
+            for message_id, message in self.channel.get_message_for(self.consumer_id):
+                try:
+                    self.process_message(message_id, message)
+                except KeyboardInterrupt:
+                    for f in [None, 'worker.txt', f"worker-{self.subsystem}-{self.consumer_id}.txt"]:
+                        logger(f, f'{self.consumer_id} обработчик упал')
+                    exit()
             sleep(0.1)  # ждем, чтобы tsd было больше 1 мс
 
 

@@ -3,8 +3,8 @@ from multiprocessing import Process
 from client import Client, command2
 from worker import Worker
 
-WORKER_COUNT = 2
-CLIENT_COUNT = 3
+WORKER_COUNT = 3
+CLIENT_COUNT = 10
 workers = []
 clients = []
 

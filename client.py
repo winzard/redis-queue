@@ -32,24 +32,8 @@ command1 = {
 
 command2 = {
     'id': None,
-    'name': 'calculate-double',
+    'name': 'change',
     'type': 'command',
-    'params': {
-        'argument': 0
-    }
-}
-command3 = {
-    'id': None,
-    'name': 'calculate-power',
-    'type': 'command',
-    'params': {
-        'argument': 0
-    }
-}
-command4 = {
-    'id': None,
-    'name': 'get_all',
-    'type': 'query',
     'params': {
         'argument': 0
     }
@@ -70,6 +54,7 @@ class Client:
         self.client_id = client_id
 
     def got_expected_response(self, entries, command_id):
+        message_id = None
         for message_id, entry in entries:
             r.xdel(f"response-{self.client_id}", message_id)
             for event_id in entry:
@@ -121,7 +106,7 @@ class Client:
                     end = datetime.now()
                     for f in [None, f"{tenant_id}.txt", f"client-{self.client_id}.txt"]:
                         logger(f, f"client-{self.client_id} F {end} {command['id']} {command['name']} {result}")
-                    r.xgroup_destroy('events', self.client_id)
+                    # r.xgroup_destroy('events', self.client_id)
                     return {
                         'client_id': f"client-{self.client_id}",
                         'command_id': command['id'],
@@ -141,8 +126,9 @@ class Client:
 
         last_seen = '$'
 
-        for x in range(0, 20):
-            command = copy(random.choice([command1, command2, command3, command4]))
+        for x in range(0, 10):
+            print(f'Отправляем команду #{x}')
+            command = copy(random.choice([command1, command2]))
             tenant_id = random.choice(['tenant_1', 'tenant_2', 'tenant_3'])
             if command['type'] == 'query':
                 counter = r.incr(f'query-{tenant_id}', 1)
@@ -161,7 +147,7 @@ class Client:
             # считывать ответы после last_id
             # когда мы видим событие, которое ждём, то можно выходить
             while True:  # TODO возможно, нужно выгребать старые сообщения тоже, плюс будет нужен таймаут
-                print('wait for response')
+                print(f'wait for response on {message_id}')
                 read = r.xread({f"response-{self.client_id}": last_seen}, count=1, block=0)  # or timeout?
                 if read:
                     _, entries = read[0]
