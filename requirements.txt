@@ -1,0 +1,3 @@
+redis==3.5.3
+Zope==5.7
+transaction==3.0.1

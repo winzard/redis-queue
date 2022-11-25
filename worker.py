@@ -12,7 +12,6 @@ from pprint import pprint
 import random
 from time import sleep
 import sys
-import redis
 import sqlite3
 import transaction
 from transaction.interfaces import IDataManager, DoomedTransaction
@@ -46,14 +45,11 @@ class DataManager(object):
 
     def _check_state(self, *ok_states):
         if self.txn_state not in ok_states:
-            raise ValueError("txn in state %r but expected one of %r" %
-                             (self.txn_state, ok_states))
+            raise ValueError("txn in state %r but expected one of %r" % (self.txn_state, ok_states))
 
-    def _checkTransaction(self, transaction):
-        if (transaction is not self.transaction
-                and self.transaction is not None):
-            raise TypeError("Transaction missmatch",
-                            transaction, self.transaction)
+    def _check_transaction(self, transaction_instance):
+        if transaction_instance is not self.transaction and self.transaction is not None:
+            raise TypeError("Transaction missmatch", transaction_instance, self.transaction)
 
     def inc(self, tenant_id, value):
         cur = self.connection.cursor()
@@ -71,28 +67,28 @@ class DataManager(object):
         else:
             return None
 
-    def tpc_begin(self, transaction):
+    def tpc_begin(self, transaction_instance):
         print('tcp_begin')
-        self._checkTransaction(transaction)
+        self._check_transaction(transaction_instance)
         self._check_state(None)
-        self.transaction = transaction
+        self.transaction = transaction_instance
         self.txn_state = 'tpc_begin'
         self.begun = True
 
-    def tpc_vote(self, transaction):
+    def tpc_vote(self, transaction_instance):
         print('tcp_vote start')
-        self._checkTransaction(transaction)
+        self._check_transaction(transaction_instance)
         self._check_state('tpc_begin')
-        if not self.worker.is_job_exists(transaction.data('message_id')):
+        if not self.worker.is_job_exists(transaction_instance.data('message_id')):
             print('doom')
             raise DoomedTransaction()
         self.state += self.delta
         self.txn_state = 'tpc_vote'
         print('tcp_vote end')
 
-    def tpc_finish(self, transaction):
+    def tpc_finish(self, transaction_instance):
         print('tcp_finish')
-        self._checkTransaction(transaction)
+        self._check_transaction(transaction_instance)
         self._check_state('tpc_vote')
         self.delta = 0
         self.transaction = None
@@ -100,11 +96,11 @@ class DataManager(object):
         self.connection.commit()
         for f in [None, "worker.txt", f"worker-{self.worker.subsystem}-{self.worker.consumer_id}.txt"]:
             logger(f,
-                   f"worker-{self.worker.subsystem}-{self.worker.consumer_id} КОММИТ {transaction.data('command_id')}")
+                   f"worker-{self.worker.subsystem}-{self.worker.consumer_id} КОММИТ {transaction_instance.data('command_id')}")
 
-    def tpc_abort(self, transaction):
+    def tpc_abort(self, transaction_instance):
         print('tcp_abort')
-        self._checkTransaction(transaction)
+        self._check_transaction(transaction_instance)
         if self.transaction is not None:
             self.transaction = None
 
@@ -114,9 +110,9 @@ class DataManager(object):
         self.txn_state = None
         self.delta = 0
 
-    def abort(self, transaction):
+    def abort(self, transaction_instance):
         print('abort')
-        self._checkTransaction(transaction)
+        self._check_transaction(transaction_instance)
         if self.transaction is not None:
             self.transaction = None
 
@@ -128,13 +124,13 @@ class DataManager(object):
         self.connection.rollback()
         for f in [None, "worker.txt", f"worker-{self.worker.subsystem}-{self.worker.consumer_id}.txt"]:
             logger(f,
-                   f"worker-{self.worker.subsystem}-{self.worker.consumer_id} ОТМЕНА {transaction.data('command_id')}")
+                   f"worker-{self.worker.subsystem}-{self.worker.consumer_id} ОТМЕНА {transaction_instance.data('command_id')}")
 
-    def commit(self, transaction):
+    def commit(self, transaction_instance):
         print('commit')
         if not self.begun:
             raise TypeError('Not prepared to commit')
-        self._checkTransaction(transaction)
+        self._check_transaction(transaction_instance)
         self.transaction = None
 
 
@@ -162,14 +158,15 @@ def get(data_manager, tenant_id):
     before = data_manager.get(tenant_id)
     fibonacci(1)  # надо чем-то занять
     after = data_manager.get(tenant_id)
-    return f'{before} to {after}'
+    return {'before': before, 'after': after}
+
 
 def change(data_manager, tenant_id, argument):
     before = data_manager.get(tenant_id)
     data_manager.inc(tenant_id, argument)  # увеличиваем счетчик
     fibonacci(random.randint(1, 15), data_manager.worker)  # длинная задача
     after = data_manager.get(tenant_id)
-    return f'{before} to {after}'
+    return {'before': before, 'after': after}
 
 
 group_name = 'workers'  # общее для всех воркеров системы
@@ -206,7 +203,7 @@ class Worker:
         pprint(command)
         response = None
         if command_type == 'query':
-            # no transation
+            # no transaction
             if command['name'] == 'get':
                 argument = command['params']['argument']
                 result = get(self.redis_data_manager, tenant_id)
@@ -230,7 +227,7 @@ class Worker:
                         response = {
                             'id': command_id,
                             'success': True,
-                            'tenand_id': tenant_id,
+                            'tenant_id': tenant_id,
                             'name': 'change-completed',
                             'result': result
                         }
@@ -241,7 +238,7 @@ class Worker:
                 response = {
                     'id': command_id,
                     'success': False,
-                    'tenand_id': tenant_id,
+                    'tenant_id': tenant_id,
                     'name': 'change-completed',
                     'result': e
                 }

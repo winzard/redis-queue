@@ -1,17 +1,28 @@
 from multiprocessing import Process
 
-from client import Client, command2
+from client import Client, command2, command1
 from worker import Worker
 
+TENANT_COUNT = 3
 WORKER_COUNT = 3
-CLIENT_COUNT = 10
+CLIENT_COUNT = 15
 workers = []
 clients = []
 
 
-def client_routine_tenant_1(client_id: int):
-    result = Client('registration', str(client_id)).process_single(command=command2, tenant_id='tenant_1')
-    print(result)
+def client_routine(client_id: int, tenant_id: str):
+    result = Client('registration', str(client_id)).process_single(command=command2, tenant_id=tenant_id)
+    if not result['result']['before']:
+        before = 0
+    else:
+        before = int(result['result']['before'].split('-')[-1])
+    if not result['result']['after']:
+        after = 0
+    else:
+        after = int(result['result']['after'].split('-')[-1])
+    assert after - before == 1
+    result = Client('registration', str(client_id)).process_single(command=command1, tenant_id=tenant_id)
+    assert result['result']['after'] == result['result']['before']
 
 
 for i in range(WORKER_COUNT):
@@ -20,7 +31,8 @@ for i in range(WORKER_COUNT):
     workers.append(worker_process)
 
 for i in range(CLIENT_COUNT):
-    client_process = Process(target=client_routine_tenant_1, args=(i,), daemon=True)
+    tenant_id = f"tenant_{i % TENANT_COUNT}"
+    client_process = Process(target=client_routine, args=(i, tenant_id), daemon=True)
     client_process.start()
     clients.append(client_process)
 
