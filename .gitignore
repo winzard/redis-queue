@@ -1,0 +1,10 @@
+*.pyc
+*.log
+__pycache__/
+.idea/
+.vscode/
+*.db
+tenant_*.txt
+worker.txt
+worker-registration-*.txt
+client-*.txt
