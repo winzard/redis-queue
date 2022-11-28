@@ -53,7 +53,7 @@ class DataManager(object):
 
     def inc(self, tenant_id, value):
         cur = self.connection.cursor()
-        sql = f"INSERT INTO result(tenant_id) VALUES('{tenant_id}') ON CONFLICT(tenant_id) DO UPDATE SET command = '{value}';"
+        sql = f"INSERT INTO result(tenant_id, command) VALUES('{tenant_id}', '{value}') ON CONFLICT(tenant_id) DO UPDATE SET command = '{value}';"
         cur.execute(sql)
         cur.close()
 

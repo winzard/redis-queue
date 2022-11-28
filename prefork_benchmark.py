@@ -4,8 +4,8 @@ from client import Client, command2, command1
 from worker import Worker
 
 TENANT_COUNT = 3
-WORKER_COUNT = 3
-CLIENT_COUNT = 15
+WORKER_COUNT = 1
+CLIENT_COUNT = 2
 workers = []
 clients = []
 
@@ -20,7 +20,7 @@ def client_routine(client_id: int, tenant_id: str):
         after = 0
     else:
         after = int(result['result']['after'].split('-')[-1])
-    assert after - before == 1
+    assert before == 0 or after - before == 1 # при первом запуске мы, разумеется, не знаем номер "предыдущей" команды
     result = Client('registration', str(client_id)).process_single(command=command1, tenant_id=tenant_id)
     assert result['result']['after'] == result['result']['before']
 
